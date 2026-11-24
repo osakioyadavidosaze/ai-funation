@@ -1,19 +1,14 @@
 "use client";
 
-import {
+import type {
   FaceLandmarker,
-  FilesetResolver,
-  type FaceLandmarkerResult,
+  FaceLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import Peer, { type DataConnection, type MediaConnection } from "peerjs";
 import { QRCodeSVG } from "qrcode.react";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
+import { createFaceLandmarker } from "@/lib/faceLandmarker";
 import { useVoiceChanger } from "@/hooks/useVoiceChanger";
-
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-const WASM_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
 
 function getBlendshape(
   result: FaceLandmarkerResult | undefined,
@@ -166,13 +161,7 @@ export default function Controller() {
 
     const initialize = async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        const createdLandmarker = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL },
-          runningMode: "VIDEO",
-          outputFaceBlendshapes: true,
-          numFaces: 1,
-        });
+        const createdLandmarker = await createFaceLandmarker();
         if (disposed) {
           createdLandmarker.close();
           return;
@@ -182,11 +171,9 @@ export default function Controller() {
         frameId = requestAnimationFrame(drawFrame);
       } catch (cause) {
         if (!disposed) {
-          setError(
-            cause instanceof Error
-              ? `Could not initialize face tracking: ${cause.message}`
-              : "Could not initialize face tracking.",
-          );
+          const message = `Face tracker failed to load: ${cause instanceof Error ? cause.message : String(cause)}`;
+          console.error(message, cause);
+          setError(message);
         }
       }
     };

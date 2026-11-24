@@ -1,17 +1,12 @@
 "use client";
 
-import {
+import type {
   FaceLandmarker,
-  FilesetResolver,
-  type FaceLandmarkerResult,
+  FaceLandmarkerResult,
 } from "@mediapipe/tasks-vision";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
+import { createFaceLandmarker } from "@/lib/faceLandmarker";
 import { useVoiceChanger } from "@/hooks/useVoiceChanger";
-
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-const WASM_URL =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm";
 
 function getBlendshape(
   result: FaceLandmarkerResult | undefined,
@@ -175,13 +170,7 @@ export default function AvatarStudio() {
 
     const initialize = async () => {
       try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-        const createdLandmarker = await FaceLandmarker.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL },
-          runningMode: "VIDEO",
-          outputFaceBlendshapes: true,
-          numFaces: 1,
-        });
+        const createdLandmarker = await createFaceLandmarker();
         if (disposed) {
           createdLandmarker.close();
           return;
@@ -191,11 +180,9 @@ export default function AvatarStudio() {
         animationFrame = requestAnimationFrame(trackFrame);
       } catch (cause) {
         if (!disposed) {
-          setError(
-            cause instanceof Error
-              ? `Face tracker failed to load: ${cause.message}`
-              : "Face tracker failed to load.",
-          );
+          const message = `Face tracker failed to load: ${cause instanceof Error ? cause.message : String(cause)}`;
+          console.error(message, cause);
+          setError(message);
         }
       }
     };
@@ -243,9 +230,20 @@ export default function AvatarStudio() {
           </p>
           <h1 className="mt-2 text-3xl font-semibold">Avatar Studio</h1>
         </div>
-        <span className="rounded-full border border-white/10 px-4 py-2 text-sm text-zinc-300">
-          Runs in your browser
-        </span>
+        <nav className="flex flex-wrap items-center justify-end gap-2">
+          <a
+            className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-ink hover:brightness-110"
+            href="/controller"
+          >
+            Laptop Studio
+          </a>
+          <a
+            className="rounded-lg border border-white/15 px-3 py-2 text-sm font-medium hover:bg-white/10"
+            href="/receiver"
+          >
+            Phone Stream View
+          </a>
+        </nav>
       </header>
 
       <section className="mx-auto grid max-w-7xl gap-5 lg:grid-cols-[1fr_260px_1fr]">
