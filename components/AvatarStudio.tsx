@@ -3,33 +3,62 @@
 import type {
   FaceLandmarker,
   FaceLandmarkerResult,
+  NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
-import { createFaceLandmarker } from "@/lib/faceLandmarker";
+import {
+  createFaceLandmarker,
+  detectPortraitLandmarks,
+} from "@/lib/faceLandmarker";
+import { drawAnimatedAvatar, drawSyntheticLabel } from "@/lib/faceMotion";
 import { useVoiceChanger } from "@/hooks/useVoiceChanger";
-
-function getBlendshape(
-  result: FaceLandmarkerResult | undefined,
-  category: string,
-) {
-  return (
-    result?.faceBlendshapes?.[0]?.categories.find(
-      (item) => item.categoryName === category,
-    )?.score ?? 0
-  );
-}
 
 export default function AvatarStudio() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const landmarksCanvasRef = useRef<HTMLCanvasElement>(null);
   const avatarRef = useRef<HTMLImageElement | null>(null);
+  const landmarkerRef = useRef<FaceLandmarker | null>(null);
+  const portraitLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
+  const portraitBusyRef = useRef(false);
+  const queuedPortraitRef = useRef<HTMLImageElement | null>(null);
+  const lastResultRef = useRef<FaceLandmarkerResult | undefined>(undefined);
   const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const [tracking, setTracking] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const voice = useVoiceChanger();
+
+  const analyzePortrait = useCallback(async (image: HTMLImageElement) => {
+    const landmarker = landmarkerRef.current;
+    if (!landmarker) return;
+    queuedPortraitRef.current = image;
+    if (portraitBusyRef.current) return;
+
+    portraitBusyRef.current = true;
+    try {
+      while (queuedPortraitRef.current && landmarkerRef.current === landmarker) {
+        const portrait = queuedPortraitRef.current;
+        queuedPortraitRef.current = null;
+        const landmarks = await detectPortraitLandmarks(landmarker, portrait);
+        if (portrait === avatarRef.current) {
+          portraitLandmarksRef.current = landmarks;
+          if (!landmarks) {
+            setError("No face was detected in the uploaded portrait; facial animation is unavailable.");
+          }
+        }
+      }
+    } catch (cause) {
+      if (landmarkerRef.current === landmarker) {
+        const message = `Could not analyze uploaded portrait: ${cause instanceof Error ? cause.message : String(cause)}`;
+        console.error(message, cause);
+        setError(message);
+      }
+    } finally {
+      portraitBusyRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     if (!videoRef.current || !cameraStream) return;
@@ -117,7 +146,10 @@ export default function AvatarStudio() {
       context.clearRect(0, 0, width, height);
       landmarksContext.clearRect(0, 0, width, height);
 
-      const result = landmarker?.detectForVideo(video, performance.now());
+      const result = portraitBusyRef.current
+        ? lastResultRef.current
+        : landmarker?.detectForVideo(video, performance.now());
+      if (!portraitBusyRef.current) lastResultRef.current = result;
       const landmarks = result?.faceLandmarks[0];
       const detected = Boolean(landmarks);
       if (detected !== previousDetected) {
@@ -135,27 +167,15 @@ export default function AvatarStudio() {
 
       const image = avatarRef.current;
       if (image?.complete && image.naturalWidth > 0) {
-        const fit = Math.min(width / image.naturalWidth, height / image.naturalHeight);
-        const scale = fit * (1 + getBlendshape(result, "jawOpen") * 0.035);
-        const rotation = landmarks
-          ? Math.atan2(
-              landmarks[263].y - landmarks[33].y,
-              landmarks[263].x - landmarks[33].x,
-            )
-          : 0;
-        const offsetX = landmarks ? (landmarks[1].x - 0.5) * width * -0.16 : 0;
-        const offsetY = landmarks ? (landmarks[1].y - 0.5) * height * -0.12 : 0;
-
-        context.save();
-        context.translate(width / 2 + offsetX, height / 2 + offsetY);
-        context.rotate(rotation);
-        context.scale(scale, scale);
-        context.drawImage(
+        drawAnimatedAvatar(
+          context,
           image,
-          -image.naturalWidth / 2,
-          -image.naturalHeight / 2,
+          portraitLandmarksRef.current,
+          result,
+          landmarks,
+          width,
+          height,
         );
-        context.restore();
       } else {
         context.fillStyle = "#242532";
         context.fillRect(0, 0, width, height);
@@ -164,6 +184,7 @@ export default function AvatarStudio() {
         context.font = "14px Arial";
         context.fillText("Upload a portrait to preview avatar motion", width / 2, height / 2);
       }
+      drawSyntheticLabel(context, width, height);
 
       animationFrame = requestAnimationFrame(trackFrame);
     };
@@ -176,7 +197,9 @@ export default function AvatarStudio() {
           return;
         }
         landmarker = createdLandmarker;
+        landmarkerRef.current = createdLandmarker;
         setTracking(true);
+        if (avatarRef.current) void analyzePortrait(avatarRef.current);
         animationFrame = requestAnimationFrame(trackFrame);
       } catch (cause) {
         if (!disposed) {
@@ -191,11 +214,13 @@ export default function AvatarStudio() {
     return () => {
       disposed = true;
       cancelAnimationFrame(animationFrame);
+      if (landmarkerRef.current === landmarker) landmarkerRef.current = null;
       landmarker?.close();
     };
-  }, [cameraStream]);
+  }, [analyzePortrait, cameraStream]);
 
   useEffect(() => {
+    portraitLandmarksRef.current = null;
     if (!avatarUrl) {
       avatarRef.current = null;
       return;
@@ -203,9 +228,11 @@ export default function AvatarStudio() {
     const image = new Image();
     image.onload = () => {
       avatarRef.current = image;
+      void analyzePortrait(image);
     };
+    image.onerror = () => setError("Could not load the uploaded portrait.");
     image.src = avatarUrl;
-  }, [avatarUrl]);
+  }, [analyzePortrait, avatarUrl]);
 
   const toggleVoice = async () => {
     setError(null);
@@ -217,6 +244,24 @@ export default function AvatarStudio() {
         cause instanceof Error
           ? `Microphone unavailable: ${cause.message}`
           : "Could not start voice modulation.",
+      );
+    }
+  };
+
+  const openFullscreenOutput = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    try {
+      if (document.fullscreenElement === canvas) {
+        await document.exitFullscreen();
+      } else {
+        await canvas.requestFullscreen();
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? `Could not open fullscreen output: ${cause.message}`
+          : "Could not open fullscreen output.",
       );
     }
   };
@@ -336,9 +381,16 @@ export default function AvatarStudio() {
             className="aspect-[4/3] w-full rounded-xl bg-[#242532] object-contain"
             ref={canvasRef}
           />
+          <button
+            className="mt-4 w-full rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-ink hover:brightness-110"
+            onClick={openFullscreenOutput}
+            type="button"
+          >
+            Full-Screen Virtual Cam Output
+          </button>
           {avatarUrl && (
             <p className="mt-3 truncate text-xs text-zinc-400">
-              Portrait loaded · motion follows detected head position and tilt
+              Portrait loaded · expressions follow face tracking
             </p>
           )}
         </Panel>

@@ -3,23 +3,17 @@
 import type {
   FaceLandmarker,
   FaceLandmarkerResult,
+  NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
 import Peer, { type DataConnection, type MediaConnection } from "peerjs";
 import { QRCodeSVG } from "qrcode.react";
 import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
-import { createFaceLandmarker } from "@/lib/faceLandmarker";
+import {
+  createFaceLandmarker,
+  detectPortraitLandmarks,
+} from "@/lib/faceLandmarker";
+import { drawAnimatedAvatar, drawSyntheticLabel } from "@/lib/faceMotion";
 import { useVoiceChanger } from "@/hooks/useVoiceChanger";
-
-function getBlendshape(
-  result: FaceLandmarkerResult | undefined,
-  category: string,
-) {
-  return (
-    result?.faceBlendshapes?.[0]?.categories.find(
-      (item) => item.categoryName === category,
-    )?.score ?? 0
-  );
-}
 
 function createRoomId() {
   return `avatar-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
@@ -30,6 +24,11 @@ export default function Controller() {
   const landmarksRef = useRef<HTMLCanvasElement>(null);
   const outputRef = useRef<HTMLCanvasElement>(null);
   const avatarRef = useRef<HTMLImageElement | null>(null);
+  const landmarkerRef = useRef<FaceLandmarker | null>(null);
+  const portraitLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
+  const portraitBusyRef = useRef(false);
+  const queuedPortraitRef = useRef<HTMLImageElement | null>(null);
+  const lastResultRef = useRef<FaceLandmarkerResult | undefined>(undefined);
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const outgoingStreamRef = useRef<MediaStream | null>(null);
   const peerRef = useRef<Peer | null>(null);
@@ -44,6 +43,36 @@ export default function Controller() {
   const [tracking, setTracking] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const voice = useVoiceChanger({ monitor: false });
+
+  const analyzePortrait = useCallback(async (image: HTMLImageElement) => {
+    const landmarker = landmarkerRef.current;
+    if (!landmarker) return;
+    queuedPortraitRef.current = image;
+    if (portraitBusyRef.current) return;
+
+    portraitBusyRef.current = true;
+    try {
+      while (queuedPortraitRef.current && landmarkerRef.current === landmarker) {
+        const portrait = queuedPortraitRef.current;
+        queuedPortraitRef.current = null;
+        const landmarks = await detectPortraitLandmarks(landmarker, portrait);
+        if (portrait === avatarRef.current) {
+          portraitLandmarksRef.current = landmarks;
+          if (!landmarks) {
+            setError("No face was detected in the uploaded portrait; facial animation is unavailable.");
+          }
+        }
+      }
+    } catch (cause) {
+      if (landmarkerRef.current === landmarker) {
+        const message = `Could not analyze uploaded portrait: ${cause instanceof Error ? cause.message : String(cause)}`;
+        console.error(message, cause);
+        setError(message);
+      }
+    } finally {
+      portraitBusyRef.current = false;
+    }
+  }, []);
 
   const stopBroadcast = useCallback(() => {
     peerRef.current?.destroy();
@@ -100,7 +129,10 @@ export default function Controller() {
 
       const width = canvas.width;
       const height = canvas.height;
-      const result = landmarker?.detectForVideo(video, performance.now());
+      const result = portraitBusyRef.current
+        ? lastResultRef.current
+        : landmarker?.detectForVideo(video, performance.now());
+      if (!portraitBusyRef.current) lastResultRef.current = result;
       const landmarks = result?.faceLandmarks[0];
       landmarksContext.clearRect(0, 0, landmarksCanvas.width, landmarksCanvas.height);
       setFaceDetected(Boolean(landmarks));
@@ -129,33 +161,17 @@ export default function Controller() {
         context.font = "18px Arial";
         context.fillText("Upload a portrait to start", width / 2, height / 2);
       } else {
-        const fit = Math.min(width / image.naturalWidth, height / image.naturalHeight);
-        const jawOpen = getBlendshape(result, "jawOpen");
-        const eyeBlink = Math.max(
-          getBlendshape(result, "eyeBlinkLeft"),
-          getBlendshape(result, "eyeBlinkRight"),
-        );
-        const faceRoll = landmarks
-          ? Math.atan2(
-              landmarks[263].y - landmarks[33].y,
-              landmarks[263].x - landmarks[33].x,
-            )
-          : 0;
-        const faceX = landmarks ? (landmarks[1].x - 0.5) * -width * 0.16 : 0;
-        const faceY = landmarks ? (landmarks[1].y - 0.5) * -height * 0.12 : 0;
-        const scale = fit * (1 + jawOpen * 0.04 - eyeBlink * 0.012);
-
-        context.save();
-        context.translate(width / 2 + faceX, height / 2 + faceY);
-        context.rotate(faceRoll);
-        context.scale(scale, scale);
-        context.drawImage(
+        drawAnimatedAvatar(
+          context,
           image,
-          -image.naturalWidth / 2,
-          -image.naturalHeight / 2,
+          portraitLandmarksRef.current,
+          result,
+          landmarks,
+          width,
+          height,
         );
-        context.restore();
       }
+      drawSyntheticLabel(context, width, height);
       frameId = requestAnimationFrame(drawFrame);
     };
 
@@ -167,7 +183,9 @@ export default function Controller() {
           return;
         }
         landmarker = createdLandmarker;
+        landmarkerRef.current = createdLandmarker;
         setTracking(true);
+        if (avatarRef.current) void analyzePortrait(avatarRef.current);
         frameId = requestAnimationFrame(drawFrame);
       } catch (cause) {
         if (!disposed) {
@@ -182,11 +200,13 @@ export default function Controller() {
     return () => {
       disposed = true;
       cancelAnimationFrame(frameId);
+      if (landmarkerRef.current === landmarker) landmarkerRef.current = null;
       landmarker?.close();
     };
-  }, [cameraStream]);
+  }, [analyzePortrait, cameraStream]);
 
   useEffect(() => {
+    portraitLandmarksRef.current = null;
     if (!avatarUrl) {
       avatarRef.current = null;
       return;
@@ -194,9 +214,11 @@ export default function Controller() {
     const image = new Image();
     image.onload = () => {
       avatarRef.current = image;
+      void analyzePortrait(image);
     };
+    image.onerror = () => setError("Could not load the uploaded portrait.");
     image.src = avatarUrl;
-  }, [avatarUrl]);
+  }, [analyzePortrait, avatarUrl]);
 
   const onAvatarSelected = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -301,6 +323,24 @@ export default function Controller() {
     }
   };
 
+  const openFullscreenOutput = async () => {
+    const canvas = outputRef.current;
+    if (!canvas) return;
+    try {
+      if (document.fullscreenElement === canvas) {
+        await document.exitFullscreen();
+      } else {
+        await canvas.requestFullscreen();
+      }
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? `Could not open fullscreen output: ${cause.message}`
+          : "Could not open fullscreen output.",
+      );
+    }
+  };
+
   return (
     <main className="min-h-screen px-5 py-8 md:px-10">
       <header className="mx-auto mb-8 flex max-w-6xl items-center justify-between">
@@ -355,6 +395,13 @@ export default function Controller() {
             height={480}
             className="aspect-[4/3] w-full rounded-xl bg-[#20212b]"
           />
+          <button
+            className="mt-4 w-full rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-ink hover:brightness-110"
+            onClick={openFullscreenOutput}
+            type="button"
+          >
+            Full-Screen Virtual Cam Output
+          </button>
           {cameraStream && (
             <p className="mt-3 text-xs text-zinc-400">
               Camera active · {tracking ? "face tracking ready" : "loading face tracker"}

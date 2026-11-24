@@ -16,6 +16,9 @@ export async function createFaceLandmarker() {
     runningMode: "VIDEO" as const,
     outputFaceBlendshapes: true,
     numFaces: 1,
+    minFaceDetectionConfidence: 0.3,
+    minFacePresenceConfidence: 0.3,
+    minTrackingConfidence: 0.3,
   };
 
   try {
@@ -38,5 +41,18 @@ export async function createFaceLandmarker() {
         `GPU initialization failed: ${describeError(gpuError)}; CPU initialization failed: ${describeError(cpuError)}`,
       );
     }
+  }
+
+}
+
+export async function detectPortraitLandmarks(
+  landmarker: FaceLandmarker,
+  image: HTMLImageElement,
+) {
+  await landmarker.setOptions({ runningMode: "IMAGE" });
+  try {
+    return landmarker.detect(image).faceLandmarks[0] ?? null;
+  } finally {
+    await landmarker.setOptions({ runningMode: "VIDEO" });
   }
 }

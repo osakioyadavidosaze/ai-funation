@@ -21,3 +21,10 @@ button,
 input {
   font: inherit;
 }
+
+canvas:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  object-fit: contain;
+  background: #000;
+}
